@@ -21,6 +21,9 @@ from .ranking import RankingResult, analyze_graph
 
 class CrawlerApp:
     MAX_GRAPH_EDGES = 150
+    EDGE_DOWN_COLOR = "#2e8b57"
+    EDGE_UP_COLOR = "#d97706"
+    EDGE_LATERAL_COLOR = "#8996a3"
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -521,14 +524,20 @@ class CrawlerApp:
             for target_index in range(count)
             if result.adjacency[target_index][source_index]
         ]
+        layer_by_node = {
+            node: layer for layer, nodes in layers.items() for node in nodes
+        }
         if self.show_ranking_edges_var.get():
             for source_index, target_index in graph_edges[: self.MAX_GRAPH_EDGES]:
                 source = result.nodes[source_index]
                 target = result.nodes[target_index]
                 x1, y1 = coordinates[source]
                 x2, y2 = coordinates[target]
+                edge_color = self._edge_color(
+                    layer_by_node[source], layer_by_node[target]
+                )
                 canvas.create_line(
-                    x1, y1, x2, y2, fill="#c2cbd3", arrow=tk.LAST, width=1
+                    x1, y1, x2, y2, fill=edge_color, arrow=tk.LAST, width=2
                 )
 
         ordered_nodes = sorted(
@@ -569,6 +578,27 @@ class CrawlerApp:
                 anchor="w",
                 fill="#6b4f00",
             )
+        canvas.create_text(
+            20,
+            20,
+            text="↓ w dół",
+            fill=self.EDGE_DOWN_COLOR,
+            anchor="w",
+        )
+        canvas.create_text(
+            100,
+            20,
+            text="↑ w górę",
+            fill=self.EDGE_UP_COLOR,
+            anchor="w",
+        )
+        canvas.create_text(
+            190,
+            20,
+            text="↔ ten sam poziom",
+            fill=self.EDGE_LATERAL_COLOR,
+            anchor="w",
+        )
         canvas.configure(scrollregion=(0, 0, width, height))
 
     def _redraw_current_ranking_graph(self) -> None:
@@ -616,6 +646,14 @@ class CrawlerApp:
         if len(label) > 22:
             return label[:19] + "..."
         return label
+
+    @classmethod
+    def _edge_color(cls, source_layer: int, target_layer: int) -> str:
+        if target_layer > source_layer:
+            return cls.EDGE_DOWN_COLOR
+        if target_layer < source_layer:
+            return cls.EDGE_UP_COLOR
+        return cls.EDGE_LATERAL_COLOR
 
     def _redraw_ranked_graph(self, event: tk.Event) -> None:
         if self.ranking_result and event.widget:
@@ -805,9 +843,12 @@ class CrawlerApp:
             for source, target in visible_edges[: self.MAX_GRAPH_EDGES]:
                 x1, y1 = positions[source]
                 x2, y2 = positions[target]
+                source_depth = pages[source].depth
+                target_depth = pages[target].depth
                 self.canvas.create_line(
                     x1 + 210, y1 + 19, x2, y2 + 19,
-                    fill="#c2cbd3", arrow="last", width=1, tags=("edge",)
+                    fill=self._edge_color(source_depth, target_depth),
+                    arrow="last", width=2, tags=("edge",)
                 )
 
         for url, page in pages.items():
@@ -832,9 +873,22 @@ class CrawlerApp:
                 20, 35 + depth * 125, text=f"Poziom {depth}", anchor="w",
                 fill="#334e68", tags=("node",)
             )
+        legend_y = height - 20
+        self.canvas.create_text(
+            20, legend_y, text="↓ w dół", anchor="w",
+            fill=self.EDGE_DOWN_COLOR, tags=("legend",)
+        )
+        self.canvas.create_text(
+            100, legend_y, text="↑ w górę", anchor="w",
+            fill=self.EDGE_UP_COLOR, tags=("legend",)
+        )
+        self.canvas.create_text(
+            190, legend_y, text="↔ ten sam poziom", anchor="w",
+            fill=self.EDGE_LATERAL_COLOR, tags=("legend",)
+        )
         if len(visible_edges) > self.MAX_GRAPH_EDGES and self.show_crawl_edges_var.get():
             self.canvas.create_text(
-                20, height - 15,
+                340, legend_y,
                 text=f"Wyświetlono {self.MAX_GRAPH_EDGES} z {len(visible_edges)} połączeń; "
                 "ukryte krawędzie ograniczają czytelność grafu.",
                 anchor="w", fill="#6b4f00", tags=("node",)
