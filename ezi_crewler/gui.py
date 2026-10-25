@@ -8,6 +8,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+from collections import deque
 from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -481,18 +482,38 @@ class CrawlerApp:
             "Wektor własny A/Nv": result.eigenvector_prestige,
         }.get(self.ranking_metric_var.get(), result.eigenvector_prestige)
         count = len(result.nodes)
-        width = max(1100, count * 65)
-        height = max(700, count * 40)
-        center_x, center_y = width / 2, height / 2
-        radius = min(width, height) * 0.38
+        if not count:
+            canvas.configure(scrollregion=(0, 0, 900, 600))
+            return
+
         node_radius = max(22, min(34, 900 // max(count, 1)))
-        coordinates = {}
-        for index, node in enumerate(result.nodes):
-            angle = -1.5708 + (2 * 3.141592653589793 * index / count)
-            coordinates[node] = (
-                center_x + radius * math.cos(angle),
-                center_y + radius * math.sin(angle),
-            )
+        layers, root = self._rank_graph_layers(result)
+        ring_radii: Dict[int, float] = {0: 0.0}
+        previous_radius = 0.0
+        for layer, nodes in sorted(layers.items()):
+            if layer == 0:
+                continue
+            minimum_radius = previous_radius + node_radius * 3.5
+            radius_for_spacing = len(nodes) * (node_radius * 2 + 24) / (2 * math.pi)
+            ring_radii[layer] = max(minimum_radius, radius_for_spacing)
+            previous_radius = ring_radii[layer]
+
+        outer_radius = max(ring_radii.values(), default=0)
+        margin = node_radius + 110
+        width = max(900, int(2 * (outer_radius + margin)))
+        height = max(650, int(2 * (outer_radius + margin)))
+        center_x, center_y = width / 2, height / 2
+        coordinates: Dict[str, Tuple[float, float]] = {root: (center_x, center_y)}
+        for layer, nodes in sorted(layers.items()):
+            if layer == 0:
+                continue
+            ring_radius = ring_radii[layer]
+            for index, node in enumerate(nodes):
+                angle = -math.pi / 2 + (2 * math.pi * index / len(nodes))
+                coordinates[node] = (
+                    center_x + ring_radius * math.cos(angle),
+                    center_y + ring_radius * math.sin(angle),
+                )
 
         graph_edges = [
             (source_index, target_index)
@@ -530,8 +551,15 @@ class CrawlerApp:
             canvas.create_text(
                 x,
                 y,
-                text=f"#{rank}\n{score_map[node]:.3f}",
+                text=f"{'KORZEŃ' if node == root else f'#{rank}'}\n{score_map[node]:.3f}",
                 font=("TkDefaultFont", 8, "bold"),
+            )
+            canvas.create_text(
+                x,
+                y + node_radius + 12,
+                text=self._short_node_label(node),
+                width=150,
+                font=("TkDefaultFont", 7),
             )
         if len(graph_edges) > self.MAX_GRAPH_EDGES and self.show_ranking_edges_var.get():
             canvas.create_text(
@@ -546,6 +574,48 @@ class CrawlerApp:
     def _redraw_current_ranking_graph(self) -> None:
         if self.ranking_result:
             self._draw_ranked_graph(self.ranking_result)
+
+    @staticmethod
+    def _rank_graph_layers(result: RankingResult) -> Tuple[Dict[int, List[str]], str]:
+        node_indices = {node: index for index, node in enumerate(result.nodes)}
+        outgoing = {
+            node: sum(
+                bool(result.adjacency[target_index][source_index])
+                for target_index in range(len(result.nodes))
+            )
+            for source_index, node in enumerate(result.nodes)
+        }
+        incoming = {
+            node: sum(bool(value) for value in result.adjacency[node_indices[node]])
+            for node in result.nodes
+        }
+        roots = [node for node in result.nodes if incoming[node] == 0]
+        root = max(roots or result.nodes, key=lambda node: outgoing[node])
+
+        distances = {root: 0}
+        pending = deque([root])
+        while pending:
+            source = pending.popleft()
+            source_index = node_indices[source]
+            for target_index, target in enumerate(result.nodes):
+                if result.adjacency[target_index][source_index] and target not in distances:
+                    distances[target] = distances[source] + 1
+                    pending.append(target)
+
+        unreachable_layer = max(distances.values(), default=0) + 1
+        for node in result.nodes:
+            distances.setdefault(node, unreachable_layer)
+        layers: Dict[int, List[str]] = {}
+        for node in result.nodes:
+            layers.setdefault(distances[node], []).append(node)
+        return layers, root
+
+    @staticmethod
+    def _short_node_label(node: str) -> str:
+        label = node.rstrip("/").rsplit("/", 1)[-1] or node
+        if len(label) > 22:
+            return label[:19] + "..."
+        return label
 
     def _redraw_ranked_graph(self, event: tk.Event) -> None:
         if self.ranking_result and event.widget:
@@ -718,9 +788,13 @@ class CrawlerApp:
         for url, page in pages.items():
             by_depth.setdefault(page.depth, []).append(url)
         positions: Dict[str, Tuple[int, int]] = {}
+        widest_layer = max((len(urls) for urls in by_depth.values()), default=1)
+        width = max(900, widest_layer * 260 + 60)
         for depth, urls in by_depth.items():
+            row_width = len(urls) * 260 - 50
+            start_x = (width - row_width) // 2
             for index, url in enumerate(urls):
-                positions[url] = (30 + depth * 300, 40 + index * 85)
+                positions[url] = (start_x + index * 260, 55 + depth * 125)
 
         visible_edges = sorted(
             (source, target)
@@ -752,11 +826,10 @@ class CrawlerApp:
                 x + 105, y + 28, text=address, font=("TkDefaultFont", 8), tags=("node",)
             )
 
-        width = max(900, (max(by_depth.keys(), default=0) + 1) * 300)
-        height = max(500, max((len(nodes) for nodes in by_depth.values()), default=1) * 85 + 50)
+        height = max(500, (max(by_depth.keys(), default=0) + 1) * 125 + 80)
         for depth in by_depth:
             self.canvas.create_text(
-                20 + depth * 300, 18, text=f"Poziom {depth}", anchor="w",
+                20, 35 + depth * 125, text=f"Poziom {depth}", anchor="w",
                 fill="#334e68", tags=("node",)
             )
         if len(visible_edges) > self.MAX_GRAPH_EDGES and self.show_crawl_edges_var.get():
