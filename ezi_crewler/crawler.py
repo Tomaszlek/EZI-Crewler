@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from .models import CrawlRun, Page
+from .models import CrawlProgress, CrawlRun, Page
 from .parsing import LinkParser, normalize_url
 
 
@@ -84,7 +84,7 @@ def crawl(
             page.error = str(error)
             page.status = "error"
             events.put(("log", f"Błąd pobierania {url}: {error}"))
-        events.put(("page", page))
+        events.put(("page", CrawlProgress(page, dict(run.pages), set(run.hyperlinks))))
 
     state = "anulowany" if stop_event.is_set() else "zakończony"
     events.put(("done", state))

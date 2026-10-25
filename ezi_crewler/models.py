@@ -33,3 +33,10 @@ class CrawlRun:
     @property
     def graph_depth(self) -> int:
         return max((page.depth for page in self.pages.values()), default=0)
+
+
+@dataclass
+class CrawlProgress:
+    page: Page
+    pages: Dict[str, Page]
+    hyperlinks: Set[Tuple[str, str]]

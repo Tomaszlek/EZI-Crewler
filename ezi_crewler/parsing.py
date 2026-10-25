@@ -74,6 +74,9 @@ class LinkParser(HTMLParser):
 
 def normalize_url(value: str, base_url: str) -> Optional[str]:
     value = html.unescape(value.strip())
+    markdown_link = re.fullmatch(r"\[[^\]]+\]\((https?://[^)\s]+)\)", value)
+    if markdown_link:
+        value = markdown_link.group(1)
     if not value or value.startswith("#"):
         return None
     absolute = urljoin(base_url, value)
