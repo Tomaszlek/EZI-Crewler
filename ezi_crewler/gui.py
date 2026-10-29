@@ -36,7 +36,7 @@ class CrawlerApp:
         self.worker: Optional[threading.Thread] = None
         self.events: "queue.Queue[Tuple[str, object]]" = queue.Queue()
         self.last_crawl_snapshot: Optional[
-            Tuple[CrawlRun, Dict[str, Page], set[Tuple[str, str]]]
+            Tuple[CrawlRun, Dict[str, Page], set[Tuple[str, str]], set[Tuple[str, str]]]
         ] = None
 
         self._build_ui()
@@ -97,6 +97,13 @@ class CrawlerApp:
             controls, text="Anuluj", command=self._cancel_crawl, state="disabled"
         )
         self.stop_button.grid(row=1, column=9, pady=(8, 0))
+        self.one_page_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            controls,
+            text="Process 1 Page only — z witryn zewnętrznych pobieraj tylko pierwszą stronę "
+            "(tryb web = Follow External URLs)",
+            variable=self.one_page_var,
+        ).grid(row=2, column=0, columnspan=8, sticky="w", pady=(8, 0))
         controls.columnconfigure(1, weight=1)
 
         self.notebook = ttk.Notebook(self.root)
@@ -164,7 +171,7 @@ class CrawlerApp:
         self.run_b_combo = ttk.Combobox(selectors, textvariable=self.run_b_var, state="readonly", width=35)
         self.run_b_combo.pack(side="left", padx=6)
         ttk.Button(selectors, text="Porównaj", command=self._compare_runs).pack(side="left", padx=8)
-        ttk.Button(selectors, text="Zapisz CSV", command=self._save_csv).pack(side="right")
+        ttk.Button(selectors, text="Save Data…", command=self._save_csv).pack(side="right")
 
         columns = ("measure", "run_a", "run_b", "difference")
         self.compare_tree = ttk.Treeview(tab, columns=columns, show="headings", height=10)
@@ -728,6 +735,7 @@ class CrawlerApp:
             strategy=self.strategy_var.get(),
             crawl_mode=self.mode_var.get(),
             using=self.using_var.get(),
+            external_one_page=self.one_page_var.get(),
         )
         self.active_run = run
         self.stop_event = threading.Event()
@@ -748,7 +756,9 @@ class CrawlerApp:
 
     def _process_events(self) -> None:
         latest_progress: Optional[Tuple[CrawlRun, CrawlProgress]] = None
-        final_snapshot: Optional[Tuple[CrawlRun, Dict[str, Page], set[Tuple[str, str]]]] = None
+        final_snapshot: Optional[
+            Tuple[CrawlRun, Dict[str, Page], set[Tuple[str, str]], set[Tuple[str, str]]]
+        ] = None
         while True:
             try:
                 kind, payload = self.events.get_nowait()
@@ -772,7 +782,7 @@ class CrawlerApp:
                 self.status_var.set(
                     f"Crawl {payload}. Zebrano {len(run.pages)} stron; graf ma {run.graph_depth} poziomów."
                 )
-                final_snapshot = (run, dict(run.pages), set(run.hyperlinks))
+                final_snapshot = (run, dict(run.pages), set(run.hyperlinks), set(run.edges))
                 self._refresh_run_choices()
             self.events.task_done()
         if final_snapshot:
@@ -781,7 +791,7 @@ class CrawlerApp:
             self._update_metrics(*final_snapshot)
         elif latest_progress:
             run, progress = latest_progress
-            snapshot = (run, progress.pages, progress.hyperlinks)
+            snapshot = (run, progress.pages, progress.hyperlinks, progress.edges)
             self.last_crawl_snapshot = snapshot
             self._draw_graph(*snapshot)
             self._update_metrics(*snapshot)
@@ -790,41 +800,57 @@ class CrawlerApp:
     def _update_metrics(
         self,
         run: CrawlRun,
-        pages: Optional[Dict[str, Page]] = None,
-        edges: Optional[set[Tuple[str, str]]] = None,
+        pages: Dict[str, Page],
+        hyperlinks: set[Tuple[str, str]],
+        edges: set[Tuple[str, str]],
     ) -> None:
-        pages = pages if pages is not None else dict(run.pages)
-        edges = edges if edges is not None else set(run.hyperlinks)
         outgoing: Dict[str, int] = {}
-        for edge in edges:
+        for edge in hyperlinks:
             outgoing[edge[0]] = outgoing.get(edge[0], 0) + 1
         root_links = outgoing.get(run.start_url, 0)
+        root_images = sum(1 for source, _ in edges - hyperlinks if source == run.start_url)
         subpage_count = sum(1 for url in pages if url != run.start_url)
         subpage_links = sum(count for url, count in outgoing.items() if url != run.start_url)
         average_subpage_links = subpage_links / subpage_count if subpage_count else 0
         errors = sum(1 for page in pages.values() if page.error)
+        depth = max((page.depth for page in pages.values() if not page.error), default=0)
+        valid_subpages = sum(1 for url, page in pages.items() if url != run.start_url and not page.error)
         self.metrics_var.set(
             f"Strony: {len(pages)} | podstrony: {subpage_count} | "
-            f"rzeczywista głębokość: {max((page.depth for page in pages.values()), default=0)}"
-            f" / {run.max_depth} | "
-            f"linki z głównej: {root_links} | linki z podstron: {subpage_links} "
-            f"(średnio {average_subpage_links:.1f}) | linki między stronami: {len(edges)} | "
+            f"rzeczywista głębokość: {depth} / {run.max_depth} | "
+            f"linki z głównej: {root_links}, obrazy z głównej: {root_images} | "
+            f"linki z podstron: {subpage_links} "
+            f"(średnio {average_subpage_links:.1f}) | linki między stronami: {len(hyperlinks)} | "
+            f"obrazy: {len(edges - hyperlinks)} | "
             f"błędy pobierania: {errors} | strategia: {run.strategy}, tryb: {run.crawl_mode}, "
-            f"Using: {run.using}"
+            f"Using: {run.using}, Process 1 Page only: {'tak' if run.external_one_page else 'nie'}\n"
+            f"Wymagania zadania: głębokość ≥ 3 — {'TAK' if depth >= 3 else 'NIE'} ({depth}); "
+            f"podstrony ≥ 20 — {'TAK' if valid_subpages >= 20 else 'NIE'} ({valid_subpages} pobranych bez błędu). "
+            "Liczba linków każdej strony jest podana w jej węźle grafu."
         )
 
     def _draw_graph(
         self,
         run: CrawlRun,
-        pages: Optional[Dict[str, Page]] = None,
-        edges: Optional[set[Tuple[str, str]]] = None,
+        pages: Dict[str, Page],
+        hyperlinks: set[Tuple[str, str]],
+        edges: set[Tuple[str, str]],
     ) -> None:
         self.canvas.delete("all")
-        pages = pages if pages is not None else dict(run.pages)
-        edges = edges if edges is not None else set(run.hyperlinks)
+        outgoing: Dict[str, int] = {}
+        for source, _ in hyperlinks:
+            outgoing[source] = outgoing.get(source, 0) + 1
+        image_counts: Dict[str, int] = {}
+        node_depths = {url: page.depth for url, page in pages.items()}
+        # Images are not fetched, so they appear as leaf nodes one level below their page.
+        for source, target in edges - hyperlinks:
+            image_counts[source] = image_counts.get(source, 0) + 1
+            if source in pages and target not in pages:
+                depth = pages[source].depth + 1
+                node_depths[target] = min(depth, node_depths.get(target, depth))
         by_depth: Dict[int, List[str]] = {}
-        for url, page in pages.items():
-            by_depth.setdefault(page.depth, []).append(url)
+        for url, depth in node_depths.items():
+            by_depth.setdefault(depth, []).append(url)
         positions: Dict[str, Tuple[int, int]] = {}
         widest_layer = max((len(urls) for urls in by_depth.values()), default=1)
         width = max(900, widest_layer * 260 + 60)
@@ -843,29 +869,38 @@ class CrawlerApp:
             for source, target in visible_edges[: self.MAX_GRAPH_EDGES]:
                 x1, y1 = positions[source]
                 x2, y2 = positions[target]
-                source_depth = pages[source].depth
-                target_depth = pages[target].depth
                 self.canvas.create_line(
-                    x1 + 210, y1 + 19, x2, y2 + 19,
-                    fill=self._edge_color(source_depth, target_depth),
+                    x1 + 210, y1 + 25, x2, y2 + 25,
+                    fill=self._edge_color(node_depths[source], node_depths[target]),
                     arrow="last", width=2, tags=("edge",)
                 )
 
-        for url, page in pages.items():
+        for url, depth in node_depths.items():
             x, y = positions[url]
-            fill = "#fce8b2" if page.error else ("#d8edff" if page.depth == 0 else "#e5f3e5")
+            page = pages.get(url)
+            if page is None:
+                fill = "#f1e4f7"
+                label = "Obraz"
+                details = ""
+            else:
+                fill = "#fce8b2" if page.error else ("#d8edff" if page.depth == 0 else "#e5f3e5")
+                label = page.title or urlsplit(url).path or urlsplit(url).netloc
+                details = f"linki: {outgoing.get(url, 0)} | obrazy: {image_counts.get(url, 0)}"
             self.canvas.create_rectangle(
-                x, y, x + 210, y + 38, fill=fill, outline="#46627c", tags=("node",)
+                x, y, x + 210, y + 50, fill=fill, outline="#46627c", tags=("node",)
             )
-            label = page.title or urlsplit(url).path or urlsplit(url).netloc
             label = label if len(label) < 31 else label[:28] + "..."
             self.canvas.create_text(
-                x + 105, y + 12, text=label, font=("TkDefaultFont", 9, "bold"), tags=("node",)
+                x + 105, y + 11, text=label, font=("TkDefaultFont", 9, "bold"), tags=("node",)
             )
             address = url if len(url) < 35 else url[:32] + "..."
             self.canvas.create_text(
-                x + 105, y + 28, text=address, font=("TkDefaultFont", 8), tags=("node",)
+                x + 105, y + 26, text=address, font=("TkDefaultFont", 8), tags=("node",)
             )
+            if details:
+                self.canvas.create_text(
+                    x + 105, y + 40, text=details, font=("TkDefaultFont", 8), tags=("node",)
+                )
 
         height = max(500, (max(by_depth.keys(), default=0) + 1) * 125 + 80)
         for depth in by_depth:
@@ -941,9 +976,10 @@ class CrawlerApp:
             ("Liczba pobranych stron", len(run_a.pages), len(run_b.pages)),
             ("Głębokość grafu", run_a.graph_depth, run_b.graph_depth),
             ("Liczba krawędzi", len(run_a.edges), len(run_b.edges)),
+            ("Obrazy", len(run_a.edges - run_a.hyperlinks), len(run_b.edges - run_b.hyperlinks)),
             ("Linki na stronie głównej",
-             sum(1 for edge in run_a.edges if edge[0] == run_a.start_url),
-             sum(1 for edge in run_b.edges if edge[0] == run_b.start_url)),
+             sum(1 for edge in run_a.hyperlinks if edge[0] == run_a.start_url),
+             sum(1 for edge in run_b.hyperlinks if edge[0] == run_b.start_url)),
             ("Błędy pobierania", sum(bool(p.error) for p in run_a.pages.values()),
              sum(bool(p.error) for p in run_b.pages.values())),
             ("Strony z tytułem", sum(bool(p.title) for p in run_a.pages.values()),
@@ -964,29 +1000,88 @@ class CrawlerApp:
             "all links może odkryć więcej zasobów niż images+hyperlinks."
         )
 
+    SAVE_FIELDS = (
+        ("URL", "url"),
+        ("Keyword", "keywords"),
+        ("Title", "title"),
+        ("Description", "description"),
+        ("Body", "body"),
+        ("Depth", "depth"),
+        ("Status", "status"),
+    )
+    SEPARATORS = (("CSV (,)", ","), ("Średnik (;)", ";"), ("Tabulator", "\t"), ("Pionowa kreska (|)", "|"))
+
     def _save_csv(self) -> None:
-        run = self.active_run
-        if run is None:
-            run = next((item for item in self.runs if item.name == self.run_b_var.get()), None)
-        if not run:
-            messagebox.showinfo("Brak danych", "Najpierw wykonaj crawl.")
+        if not self.runs:
+            messagebox.showinfo("Brak danych", "Najpierw wykonaj i zakończ crawl.")
             return
+        names = [run.name for run in self.runs]
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Save Data")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=10)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Sesja:").grid(row=0, column=0, sticky="w")
+        session_var = tk.StringVar(
+            value=self.run_b_var.get() if self.run_b_var.get() in names else names[-1]
+        )
+        ttk.Combobox(
+            frame, textvariable=session_var, values=names, state="readonly", width=40
+        ).grid(row=0, column=1, sticky="ew", padx=6, pady=(0, 8))
+
+        ttk.Label(frame, text="Separator Format:").grid(row=1, column=0, sticky="w")
+        separator_var = tk.StringVar(value=self.SEPARATORS[0][0])
+        ttk.Combobox(
+            frame,
+            textvariable=separator_var,
+            values=[label for label, _ in self.SEPARATORS],
+            state="readonly",
+            width=20,
+        ).grid(row=1, column=1, sticky="w", padx=6, pady=(0, 8))
+
+        fields_frame = ttk.LabelFrame(frame, text="Save Field", padding=6)
+        fields_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        field_vars: Dict[str, tk.BooleanVar] = {}
+        for index, (label, _) in enumerate(self.SAVE_FIELDS):
+            field_vars[label] = tk.BooleanVar(value=label in ("URL", "Keyword"))
+            ttk.Checkbutton(fields_frame, text=label, variable=field_vars[label]).grid(
+                row=index // 4, column=index % 4, sticky="w", padx=(0, 12)
+            )
+
+        def confirm() -> None:
+            fields = [(label, attr) for label, attr in self.SAVE_FIELDS if field_vars[label].get()]
+            if not fields:
+                messagebox.showerror("Brak pól", "Wybierz co najmniej jedno pole.", parent=dialog)
+                return
+            run = next(item for item in self.runs if item.name == session_var.get())
+            separator = dict(self.SEPARATORS)[separator_var.get()]
+            dialog.destroy()
+            self._write_run_csv(run, fields, separator)
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="Zapisz…", command=confirm).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Anuluj", command=dialog.destroy).pack(side="left")
+
+    def _write_run_csv(
+        self, run: CrawlRun, fields: List[Tuple[str, str]], separator: str
+    ) -> None:
         path = filedialog.asksaveasfilename(
             title="Zapisz dane crawl",
             defaultextension=".csv",
-            filetypes=(("Pliki CSV", "*.csv"),),
+            filetypes=(("Pliki CSV", "*.csv"), ("Pliki tekstowe", "*.txt")),
             initialfile="crawl.csv",
         )
         if not path:
             return
         try:
             with open(path, "w", newline="", encoding="utf-8-sig") as csv_file:
-                writer = csv.writer(csv_file, delimiter=";")
-                writer.writerow(("URL", "Keyword", "Title", "Description", "Body", "Depth", "Status"))
+                writer = csv.writer(csv_file, delimiter=separator)
+                writer.writerow(label for label, _ in fields)
                 for page in run.pages.values():
-                    writer.writerow(
-                        (page.url, page.keywords, page.title, page.description, page.body, page.depth, page.status)
-                    )
+                    writer.writerow(getattr(page, attr) for _, attr in fields)
         except OSError as error:
             messagebox.showerror("Nie udało się zapisać CSV", str(error))
             return
