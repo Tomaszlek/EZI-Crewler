@@ -26,6 +26,7 @@ class CrawlRun:
     strategy: str
     crawl_mode: str
     using: str
+    external_one_page: bool = False
     pages: Dict[str, Page] = field(default_factory=dict)
     edges: Set[Tuple[str, str]] = field(default_factory=set)
     hyperlinks: Set[Tuple[str, str]] = field(default_factory=set)
@@ -40,3 +41,4 @@ class CrawlProgress:
     page: Page
     pages: Dict[str, Page]
     hyperlinks: Set[Tuple[str, str]]
+    edges: Set[Tuple[str, str]]
