@@ -28,6 +28,11 @@ def _fetch_page(url: str, timeout: float = 12.0) -> Tuple[str, str, int]:
         return data.decode(charset, errors="replace"), content_type, response.status
 
 
+def _site_host(url: str) -> str:
+    host = (urlsplit(url).hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
 def crawl(
     run: CrawlRun,
     stop_event: threading.Event,
@@ -35,7 +40,7 @@ def crawl(
     delay: float,
 ) -> None:
     """Crawl a site and send progress events to the Tkinter thread."""
-    root_host = (urlsplit(run.start_url).hostname or "").lower()
+    root_host = _site_host(run.start_url)
     pending = deque([(run.start_url, 0)])
     scheduled = {run.start_url}
     last_request = 0.0
@@ -65,14 +70,15 @@ def crawl(
                     target = normalize_url(raw_url, url)
                     if not target:
                         continue
-                    host = (urlsplit(target).hostname or "").lower()
-                    if run.crawl_mode == "server" and host != root_host:
+                    if run.crawl_mode == "server" and _site_host(target) != root_host:
                         continue
                     run.edges.add((url, target))
                     if kind == "link":
                         run.hyperlinks.add((url, target))
                     discovered.append((target, kind))
-                if depth < run.max_depth:
+                # Process 1 Page only: external sites contribute only their first page.
+                external_leaf = run.external_one_page and _site_host(url) != root_host
+                if depth < run.max_depth and not external_leaf:
                     for target, kind in discovered:
                         if kind == "image" or target in scheduled:
                             continue
@@ -84,7 +90,7 @@ def crawl(
             page.error = str(error)
             page.status = "error"
             events.put(("log", f"Błąd pobierania {url}: {error}"))
-        events.put(("page", CrawlProgress(page, dict(run.pages), set(run.hyperlinks))))
+        events.put(("page", CrawlProgress(page, dict(run.pages), set(run.hyperlinks), set(run.edges))))
 
     state = "anulowany" if stop_event.is_set() else "zakończony"
     events.put(("done", state))
